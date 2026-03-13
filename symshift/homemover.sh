@@ -2,23 +2,9 @@
 umask 077
 
 usage() {
-    echo "Usage: $(basename "$0") [OPTIONS] [MIN_SIZE_MB]"
+    echo "Usage: $(basename "$0")"
     echo ""
     echo "Move large directories from \$HOME to sgoinfre/goinfre and replace with symlinks."
-    echo ""
-    echo "Arguments:"
-    echo "  MIN_SIZE_MB        Minimum directory size in MB to be listed as candidate (default: 50)"
-    echo ""
-    echo "Options:"
-    echo "  -h, --help         Show this help message and exit"
-    echo ""
-    echo "Environment Variables:"
-    echo "  VERIFY_MODE        Copy verification mode: 'full' (default) or 'size' (skip file count)"
-    echo ""
-    echo "Examples:"
-    echo "  $(basename "$0")             # List directories >= 50 MB"
-    echo "  $(basename "$0") 100         # List directories >= 100 MB"
-    echo "  VERIFY_MODE=size $(basename "$0")   # Skip file count verification"
     echo ""
     echo "Log file: \$HOME/homemover_script.log"
 }
@@ -34,8 +20,11 @@ BLUE='\033[0;34m'
 BOLD='\033[1m'
 NC='\033[0m'
 
+# Trap Ctrl+C (SIGINT) to allow clean exit
+trap 'echo -e "\n${RED}Interrupted by user. Exiting...${NC}"; exit 130' SIGINT
+
 LOG_FILE="$HOME/homemover_script.log"
-MIN_SIZE_MB=${1:-50}
+MIN_SIZE_MB=${1:-0}
 
 USER_ID=$(whoami)
 TOTAL_MOVED_MB=0
@@ -71,6 +60,17 @@ format_size() {
     fi
 }
 
+format_size_kb() {
+    local kb=$1
+    if [ "$kb" -ge 1048576 ]; then
+        echo "$((kb / 1048576)) GB"
+    elif [ "$kb" -ge 1024 ]; then
+        echo "$((kb / 1024)) MB"
+    else
+        echo "$kb KB"
+    fi
+}
+
 if [ -d "/sgoinfre" ]; then
     TARGET_DISK="sgoinfre"
     TARGET_BASE="/sgoinfre/$USER_ID/home"
@@ -90,14 +90,17 @@ log_msg "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!${NC}"
 log_msg "${YELLOW}sgoinfre/goinfre drives can be wiped by the system at any time."
 log_msg "This script frees up your quota by moving large directories.${NC}\n"
 usage
-log_msg "\n${BLUE}Minimum size threshold: ${BOLD}$MIN_SIZE_MB MB${NC}"
 log_msg "${RED}${BOLD}!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!${NC}\n"
 
-log_msg "--- Homemover Script Started (Min Size: $MIN_SIZE_MB MB) ---"
+log_msg "--- Homemover Script Started ---"
 
 get_size_mb() {
     local size_kb=$(du -sk "$1" 2>/dev/null | awk '{print $1}')
     echo $((${size_kb:-0} / 1024))
+}
+
+get_size_kb() {
+    du -sk "$1" 2>/dev/null | awk '{print $1}'
 }
 
 resolve_path() {
@@ -139,8 +142,9 @@ verify_copy() {
     local dest="$2"
     local mode="${VERIFY_MODE:-full}"
     local src_size dest_size
-    src_size=$(du -sk "$src" 2>/dev/null | awk '{print $1}')
-    dest_size=$(du -sk "$dest" 2>/dev/null | awk '{print $1}')
+    # Use --apparent-size to ignore block size differences between filesystems
+    src_size=$(du -sk --apparent-size "$src" 2>/dev/null | awk '{print $1}')
+    dest_size=$(du -sk --apparent-size "$dest" 2>/dev/null | awk '{print $1}')
     
     if [ "${src_size:-0}" -ne "${dest_size:-0}" ]; then
         log_msg "    ${RED}[VERIFY FAILED]${NC} Size mismatch: src=${src_size}K dest=${dest_size}K"
@@ -239,7 +243,9 @@ move_and_link() {
 log_msg "${BLUE}Target drive to use: /$TARGET_DISK${NC}"
 log_msg "${BLUE}Scanning home directory...${NC}\n"
 
-while IFS= read -r item; do
+mapfile -t items < <(find "$HOME" -maxdepth 1 -mindepth 1 2>/dev/null | sort)
+
+for item in "${items[@]}"; do
     [ -d "$item" ] || continue
     [ -L "$item" ] && continue
     
@@ -264,8 +270,9 @@ while IFS= read -r item; do
             fi
             size=$(get_size_mb "$target_sub")
             if [ "$size" -ge "$MIN_SIZE_MB" ]; then
-                log_msg "${YELLOW}[EXCEPTION]${NC} ~/.local/share directory is large ($size MB)."
-                read -p "  Do you want to move this folder? [y/N]: " res
+                size_kb=$(get_size_kb "$target_sub")
+                log_msg "${YELLOW}[EXCEPTION]${NC} ~/.local/share directory is large ($(format_size_kb "$size_kb"))."
+                read -r -p "  Do you want to move this folder? [y/N]: " res </dev/tty
                 if [ "$res" = "y" ] || [ "$res" = "Y" ]; then
                     move_and_link "$target_sub"
                 else
@@ -279,15 +286,16 @@ while IFS= read -r item; do
     size=$(get_size_mb "$item")
     
     if [ "$size" -ge "$MIN_SIZE_MB" ]; then
-        log_msg "${YELLOW}[CANDIDATE]${NC} ~/$rel ($size MB)"
-        read -p "  Do you want to move this folder? [y/N]: " res
+        size_kb=$(get_size_kb "$item")
+        log_msg "${YELLOW}[CANDIDATE]${NC} ~/$rel ($(format_size_kb "$size_kb"))"
+        read -r -p "  Do you want to move this folder? [y/N]: " res </dev/tty
         if [ "$res" = "y" ] || [ "$res" = "Y" ]; then
             move_and_link "$item"
         else
             log_msg "  -> Skipped."
         fi
     fi
-done < <(find "$HOME" -maxdepth 1 -mindepth 1 | sort)
+done
 
 # Final Summary
 HOME_STATS=$(df -m "$HOME" | tail -n 1)

@@ -2,19 +2,9 @@
 umask 077
 
 usage() {
-    echo "Usage: $(basename "$0") [OPTIONS]"
+    echo "Usage: $(basename "$0")"
     echo ""
     echo "Restore symlinked directories from sgoinfre/goinfre back to \$HOME."
-    echo ""
-    echo "Options:"
-    echo "  -h, --help         Show this help message and exit"
-    echo ""
-    echo "Environment Variables:"
-    echo "  VERIFY_MODE        Copy verification mode: 'full' (default) or 'size' (skip file count)"
-    echo ""
-    echo "Examples:"
-    echo "  $(basename "$0")                    # Scan and restore interactively"
-    echo "  VERIFY_MODE=size $(basename "$0")    # Skip file count verification"
     echo ""
     echo "Log file: \$HOME/homemover_script.log"
 }
@@ -29,6 +19,9 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 BOLD='\033[1m'
 NC='\033[0m'
+
+# Trap Ctrl+C (SIGINT) to allow clean exit
+trap 'echo -e "\n${RED}Interrupted by user. Exiting...${NC}"; exit 130' SIGINT
 
 LOG_FILE="$HOME/homemover_script.log"
 TOTAL_RESTORED_MB=0
@@ -101,8 +94,9 @@ verify_copy() {
     local dest="$2"
     local mode="${VERIFY_MODE:-full}"
     local src_size dest_size
-    src_size=$(du -sk "$src" 2>/dev/null | awk '{print $1}')
-    dest_size=$(du -sk "$dest" 2>/dev/null | awk '{print $1}')
+    # Use --apparent-size to ignore block size differences between filesystems
+    src_size=$(du -sk --apparent-size "$src" 2>/dev/null | awk '{print $1}')
+    dest_size=$(du -sk --apparent-size "$dest" 2>/dev/null | awk '{print $1}')
     
     if [ "${src_size:-0}" -ne "${dest_size:-0}" ]; then
         log_msg "    ${RED}[VERIFY FAILED]${NC} Size mismatch: src=${src_size}K dest=${dest_size}K"
@@ -198,6 +192,14 @@ bring_back() {
         log_cmd "rm -rf -- \"$target_path\""
         rm -rf -- "$target_path"
         
+        # Cleanup parent directory if empty (e.g., .local if it's now empty)
+        local parent_dir
+        parent_dir=$(dirname "$target_path")
+        if rmdir "$parent_dir" 2>/dev/null; then
+             log_msg "    ${YELLOW}[CLEANUP]${NC} Removed empty parent directory on target: $parent_dir"
+             log_cmd "rmdir \"$parent_dir\""
+        fi
+
         log_msg "    ${GREEN}[OK]${NC} ~/$rel restored successfully."
     else
         log_res "FAILED (Exit Code: $status)"
@@ -211,21 +213,16 @@ clear
 log_msg "${RED}${BOLD}!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
 log_msg "                      HOMEBRINGER (UNDO)"
 log_msg "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!${NC}"
-log_msg "This script moves directories back from sgoinfre/goinfre to Home."
-log_msg "Make sure you have enough disk quota in your home directory."
-log_msg "${RED}${BOLD}!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!${NC}\n"
+usage
+log_msg "${RED}${BOLD}!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!${NC}\\n"
 
-# Initialize log file (Append mode)
-: >> "$LOG_FILE"
-chmod 600 "$LOG_FILE" 2>/dev/null
-echo "----------------------------------------------------------------" >> "$LOG_FILE"
-date '+%Y-%m-%d %H:%M:%S - Homebringer Script Started' >> "$LOG_FILE"
+log_msg "--- Homebringer Script Started ---"
 
 # Start scanning
 log_msg "${BLUE}Scanning home directory for symlinks to sgoinfre/goinfre...${NC}\n"
 
 FOUND=0
-while IFS= read -r item; do
+while IFS= read -r -u 3 item; do
     rel="${item#$HOME/}"
 
     # Special handling for .local/share
@@ -237,7 +234,7 @@ while IFS= read -r item; do
                 FOUND=1
                 size=$(get_size_mb "$target")
                 log_msg "${YELLOW}[EXCEPTION]${NC} ~/.local/share points to external drive ($size MB)"
-                read -p "  Do you want to bring this folder back to Home? [y/N]: " res
+                read -r -p "  Do you want to bring this folder back to Home? [y/N]: " res </dev/tty
                 if [ "$res" = "y" ] || [ "$res" = "Y" ]; then
                     bring_back "$sub" "$target"
                 else
@@ -260,14 +257,14 @@ while IFS= read -r item; do
         size=$(get_size_mb "$target")
         
         log_msg "${YELLOW}[LINKED]${NC} ~/$rel points to external drive ($size MB)"
-        read -p "  Do you want to bring this folder back to Home? [y/N]: " res
+        read -r -p "  Do you want to bring this folder back to Home? [y/N]: " res </dev/tty
         if [ "$res" = "y" ] || [ "$res" = "Y" ]; then
             bring_back "$item" "$target"
         else
             log_msg "  -> Skipped."
         fi
     fi
-done < <(find "$HOME" -maxdepth 1 -mindepth 1 | sort)
+done 3< <(find "$HOME" -maxdepth 1 -mindepth 1 | sort)
 
 if [ $FOUND -eq 0 ]; then
     log_msg "${YELLOW}No linked directories found to bring back.${NC}"
